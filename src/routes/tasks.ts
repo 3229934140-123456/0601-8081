@@ -5,6 +5,14 @@ import { TaskStatus } from '../types';
 
 const router = Router();
 
+function classifyError(taskId: string, operator: string, action: string): string | null {
+  const task = taskService.getTaskById(taskId);
+  if (!task) return '任务不存在';
+  if (task.status !== TaskStatus.PENDING) return `任务已${task.status}，无法${action}`;
+  if (task.assignee !== operator) return `无权操作：当前任务负责人为 ${task.assignee}，非 ${operator}`;
+  return null;
+}
+
 router.get('/', (req: Request, res: Response) => {
   try {
     const { assignee, status, instanceId } = req.query;
@@ -54,7 +62,8 @@ router.post('/:id/approve', (req: Request, res: Response) => {
     const instance = flowInstanceService.approveTask(id, approver, comment);
 
     if (!instance) {
-      return res.status(400).json({ error: '审批失败' });
+      const reason = classifyError(id, approver, '审批');
+      return res.status(403).json({ error: reason || '审批失败' });
     }
 
     res.json(instance);
@@ -75,7 +84,8 @@ router.post('/:id/reject', (req: Request, res: Response) => {
     const instance = flowInstanceService.rejectTask(id, rejector, comment);
 
     if (!instance) {
-      return res.status(400).json({ error: '拒绝失败' });
+      const reason = classifyError(id, rejector, '拒绝');
+      return res.status(403).json({ error: reason || '拒绝失败' });
     }
 
     res.json(instance);
@@ -96,7 +106,8 @@ router.post('/:id/transfer', (req: Request, res: Response) => {
     const instance = flowInstanceService.transferTask(id, fromUser, toUser, comment);
 
     if (!instance) {
-      return res.status(400).json({ error: '转交失败' });
+      const reason = classifyError(id, fromUser, '转交');
+      return res.status(403).json({ error: reason || '转交失败' });
     }
 
     res.json(instance);
@@ -117,7 +128,8 @@ router.post('/:id/return', (req: Request, res: Response) => {
     const instance = flowInstanceService.returnTask(id, operator, comment, targetNodeId);
 
     if (!instance) {
-      return res.status(400).json({ error: '退回失败' });
+      const reason = classifyError(id, operator, '退回');
+      return res.status(403).json({ error: reason || '退回失败' });
     }
 
     res.json(instance);

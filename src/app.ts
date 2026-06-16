@@ -18,7 +18,11 @@ app.use('/api/tasks', tasksRouter);
 app.use('/api/migration', migrationRouter);
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: Date.now() });
+  res.json({
+    status: 'ok',
+    service: 'workflow-approval-system',
+    timestamp: Date.now()
+  });
 });
 
 app.listen(PORT, () => {

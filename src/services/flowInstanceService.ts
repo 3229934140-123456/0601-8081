@@ -106,6 +106,7 @@ export class FlowInstanceService {
   approveTask(taskId: string, approver: string, comment?: string): FlowInstance | null {
     const task = taskService.getTaskById(taskId);
     if (!task || task.status !== TaskStatus.PENDING) return null;
+    if (task.assignee !== approver) return null;
 
     const instance = this.getInstance(task.instanceId);
     if (!instance || instance.status !== InstanceStatus.RUNNING) return null;
@@ -130,6 +131,7 @@ export class FlowInstanceService {
     const result = taskService.isNodeApprovalComplete(instance.id, node.id, mode);
 
     if (result.complete && result.result) {
+      taskService.cancelTasksForNode(instance.id, node.id);
       this.completeNode(instance.id, node);
     }
 
@@ -139,6 +141,7 @@ export class FlowInstanceService {
   rejectTask(taskId: string, rejector: string, comment?: string): FlowInstance | null {
     const task = taskService.getTaskById(taskId);
     if (!task || task.status !== TaskStatus.PENDING) return null;
+    if (task.assignee !== rejector) return null;
 
     const instance = this.getInstance(task.instanceId);
     if (!instance || instance.status !== InstanceStatus.RUNNING) return null;
@@ -173,6 +176,7 @@ export class FlowInstanceService {
   transferTask(taskId: string, fromUser: string, toUser: string, comment?: string): FlowInstance | null {
     const task = taskService.getTaskById(taskId);
     if (!task || task.status !== TaskStatus.PENDING) return null;
+    if (task.assignee !== fromUser) return null;
 
     const instance = this.getInstance(task.instanceId);
     if (!instance || instance.status !== InstanceStatus.RUNNING) return null;
@@ -183,6 +187,8 @@ export class FlowInstanceService {
 
     taskService.transferTask(taskId, toUser, comment);
 
+    const newTask = taskService.createSingleTask(instance.id, node.id, toUser);
+
     historyService.addRecord(
       instance.id,
       task.nodeId,
@@ -190,7 +196,7 @@ export class FlowInstanceService {
       fromUser,
       '转交',
       comment,
-      { to: toUser }
+      { from: fromUser, to: toUser, originalTaskId: taskId, newTaskId: newTask.id }
     );
 
     return this.getInstance(instance.id);
@@ -199,6 +205,7 @@ export class FlowInstanceService {
   returnTask(taskId: string, operator: string, comment?: string, targetNodeId?: string): FlowInstance | null {
     const task = taskService.getTaskById(taskId);
     if (!task || task.status !== TaskStatus.PENDING) return null;
+    if (task.assignee !== operator) return null;
 
     const instance = this.getInstance(task.instanceId);
     if (!instance || instance.status !== InstanceStatus.RUNNING) return null;
@@ -359,7 +366,7 @@ export class FlowInstanceService {
       'system',
       '并行开始',
       undefined,
-      { branches: config.branches.length, firstNodes }
+      { branches: config.branches.length, firstNodes, mode: config.mode }
     );
 
     for (const nodeId of firstNodes) {
@@ -397,11 +404,9 @@ export class FlowInstanceService {
     const now = Date.now();
 
     const stmt = db.prepare(`
-      UPDATE flow_instances SET status = ?, updated_at = ? WHERE id = ?
+      UPDATE flow_instances SET status = ?, current_node_ids = ?, updated_at = ? WHERE id = ?
     `);
-    stmt.run(InstanceStatus.APPROVED, now, instanceId);
-
-    this.leaveNode(instanceId, node.id);
+    stmt.run(InstanceStatus.APPROVED, JSON.stringify([]), now, instanceId);
 
     historyService.addRecord(
       instanceId,
@@ -420,6 +425,7 @@ export class FlowInstanceService {
     const parentParallel = this.findParentParallel(definition, completedNode.id);
 
     if (parentParallel) {
+      const parallelConfig = parentParallel.config as ParallelNodeConfig;
       const branch = this.findBranchForNode(parentParallel, completedNode.id);
       if (branch) {
         const nodeIndex = branch.indexOf(completedNode.id);
@@ -428,7 +434,13 @@ export class FlowInstanceService {
         if (isLastInBranch) {
           this.leaveNode(instanceId, completedNode.id);
 
-          if (this.areAllBranchesComplete(instanceId, parentParallel)) {
+          const shouldAdvance = parallelConfig.mode === ApprovalMode.ANY
+            || this.areAllBranchesComplete(instanceId, parentParallel);
+
+          if (shouldAdvance) {
+            if (parallelConfig.mode === ApprovalMode.ANY) {
+              this.cancelOtherBranches(instanceId, parentParallel, branch);
+            }
             const nextNodes = flowDefinitionService.getNextNodes(definition, parentParallel.id);
             if (nextNodes.length > 0) {
               this.addCurrentNode(instanceId, nextNodes[0].id);
@@ -451,6 +463,41 @@ export class FlowInstanceService {
         this.enterNode(instanceId, nextNodes[0].id);
       }
     }
+  }
+
+  private cancelOtherBranches(
+    instanceId: string,
+    parallelNode: FlowNode,
+    completedBranch: string[]
+  ): void {
+    const instance = this.getInstance(instanceId);
+    if (!instance) return;
+
+    const config = parallelNode.config as ParallelNodeConfig;
+    if (!config || !config.branches) return;
+
+    const otherNodeIds: string[] = [];
+    for (const branch of config.branches) {
+      if (branch === completedBranch) continue;
+      for (const nodeId of branch) {
+        otherNodeIds.push(nodeId);
+      }
+    }
+
+    taskService.cancelTasksForNodes(instanceId, otherNodeIds);
+
+    const newCurrentIds = instance.currentNodeIds.filter(id => !otherNodeIds.includes(id));
+    this.setCurrentNodes(instanceId, newCurrentIds);
+
+    historyService.addRecord(
+      instanceId,
+      parallelNode.id,
+      parallelNode.name,
+      'system',
+      '并行或签完成',
+      undefined,
+      { completedBranch, canceledBranches: config.branches.filter(b => b !== completedBranch).length }
+    );
   }
 
   private leaveNode(instanceId: string, nodeId: string): void {

@@ -267,6 +267,9 @@ function demoSerialApproval() {
     currentNodes: inst2!.currentNodeIds
   });
 
+  const hr2After = taskService.getTasksByAssignee('hr_2', TaskStatus.PENDING);
+  log('HR_2的待办是否被取消', hr2After.length === 0 ? '是 - 已自动取消' : '否 - 仍有' + hr2After.length + '条待办');
+
   const tasks4 = taskService.getTasksByAssignee('director', TaskStatus.PENDING);
   log('总监的待办任务', tasks4.map(t => ({ id: t.id, node: t.nodeId })));
 
@@ -301,7 +304,8 @@ function demoParallelApproval() {
   log('发起采购审批', { instanceId: instance!.id, currentNodes: instance!.currentNodeIds });
 
   let tasks = taskService.getTasksByAssignee('manager_a', TaskStatus.PENDING);
-  flowInstanceService.approveTask(tasks[0].id, 'manager_a', '同意采购');
+  const mgrTask = tasks.find(t => t.instanceId === instance!.id)!;
+  flowInstanceService.approveTask(mgrTask.id, 'manager_a', '同意采购');
   log('部门经理审批通过，进入会签阶段');
 
   const financeTasks = taskService.getTasksByAssignee('finance_1', TaskStatus.PENDING);
@@ -357,7 +361,8 @@ function demoConditionalBranching() {
   );
 
   let tasks = taskService.getTasksByAssignee('manager_a', TaskStatus.PENDING);
-  flowInstanceService.approveTask(tasks[0].id, 'manager_a', '同意');
+  const mgrTask1 = tasks.find(t => t.instanceId === instance1!.id)!;
+  flowInstanceService.approveTask(mgrTask1.id, 'manager_a', '同意');
 
   let inst = flowInstanceService.getInstance(instance1!.id)!;
   log('500元报销 - 部门经理通过后走向', { currentNodes: inst.currentNodeIds });
@@ -419,10 +424,11 @@ function demoReturnAndWithdraw() {
   );
 
   let tasks = taskService.getTasksByAssignee('manager_a', TaskStatus.PENDING);
-  log('部门经理收到待办', tasks.length);
+  const mgrTask1 = tasks.find(t => t.instanceId === instance1!.id)!;
+  log('部门经理收到待办', 1);
 
   const inst1 = flowInstanceService.returnTask(
-    tasks[0].id,
+    mgrTask1.id,
     'manager_a',
     '请假理由不充分，请补充',
     'start'
@@ -443,18 +449,27 @@ function demoReturnAndWithdraw() {
   );
 
   tasks = taskService.getTasksByAssignee('manager_a', TaskStatus.PENDING);
-  const mgrTask = tasks.find(t => t.instanceId === instance2!.id)!;
+  const mgrTask2 = tasks.find(t => t.instanceId === instance2!.id)!;
 
   const inst2 = flowInstanceService.transferTask(
-    mgrTask.id,
+    mgrTask2.id,
     'manager_a',
     'manager_b',
     '我出差了，帮我审批一下'
   );
   log('manager_a 转交给 manager_b', { status: inst2!.status });
 
+  const originalTask = taskService.getTaskById(mgrTask2.id);
+  log('原任务状态', { id: mgrTask2.id, assignee: originalTask!.assignee, status: originalTask!.status });
+
   const tasksOfB = taskService.getTasksByAssignee('manager_b', TaskStatus.PENDING);
-  log('manager_b的待办任务数', tasksOfB.length);
+  log('manager_b的待办任务', tasksOfB.filter(t => t.instanceId === instance2!.id).map(t => ({ id: t.id, assignee: t.assignee, status: t.status })));
+
+  flowInstanceService.approveTask(tasksOfB[0].id, 'manager_b', '代为审批通过');
+  log('manager_b 审批通过后');
+
+  const inst2After = flowInstanceService.getInstance(instance2!.id)!;
+  log('转交审批后流程状态', { currentNodes: inst2After.currentNodeIds, status: inst2After.status });
 
   log('--- 场景3: 发起人撤回 ---');
   const instance3 = flowInstanceService.startInstance(
@@ -698,6 +713,119 @@ function demoRejectInCountersign() {
   return def;
 }
 
+function demoParallelAnyMode() {
+  log('【Demo 7】并行或签模式 - 任一分支通过即流转');
+
+  const nodes: FlowNode[] = [
+    { id: 'start', type: NodeType.START, name: '开始' },
+    {
+      id: 'dept_approval',
+      type: NodeType.APPROVAL,
+      name: '部门经理审批',
+      config: { assignees: ['manager_a'], mode: ApprovalMode.ONE }
+    },
+    {
+      id: 'parallel_any',
+      type: NodeType.PARALLEL,
+      name: '多部门审核(或签)',
+      config: {
+        mode: ApprovalMode.ANY,
+        branches: [
+          ['hr_review'],
+          ['finance_review']
+        ]
+      }
+    },
+    {
+      id: 'hr_review',
+      type: NodeType.APPROVAL,
+      name: 'HR审核',
+      config: { assignees: ['hr_1'], mode: ApprovalMode.ONE }
+    },
+    {
+      id: 'finance_review',
+      type: NodeType.APPROVAL,
+      name: '财务审核',
+      config: { assignees: ['finance_1'], mode: ApprovalMode.ONE }
+    },
+    { id: 'end', type: NodeType.END, name: '结束' }
+  ];
+
+  const edges = [
+    { source: 'start', target: 'dept_approval' },
+    { source: 'dept_approval', target: 'parallel_any' },
+    { source: 'parallel_any', target: 'end' }
+  ];
+
+  const def = flowDefinitionService.createDefinition(
+    '并行或签测试',
+    nodes,
+    edges,
+    'start',
+    'end'
+  );
+  log('创建并行或签流程', { id: def.id });
+
+  const instance = flowInstanceService.startInstance(def.id, 'applicant', { item: '并行或签测试' });
+
+  const mgrTasks = taskService.getTasksByAssignee('manager_a', TaskStatus.PENDING);
+  const mgrTask = mgrTasks.find(t => t.instanceId === instance!.id)!;
+  flowInstanceService.approveTask(mgrTask.id, 'manager_a', '同意');
+  log('部门经理通过，进入并行或签阶段');
+
+  let inst = flowInstanceService.getInstance(instance!.id)!;
+  log('当前节点(两个分支同时启动)', { currentNodes: inst.currentNodeIds });
+
+  const hrTasks = taskService.getTasksByAssignee('hr_1', TaskStatus.PENDING);
+  const financeTasks = taskService.getTasksByAssignee('finance_1', TaskStatus.PENDING);
+  log('HR和财务都有待办', { hr: hrTasks.length, finance: financeTasks.length });
+
+  log('--- HR先通过 ---');
+  flowInstanceService.approveTask(hrTasks[0].id, 'hr_1', 'HR审核通过');
+
+  inst = flowInstanceService.getInstance(instance!.id)!;
+  log('HR通过后实例状态', { status: inst.status, currentNodes: inst.currentNodeIds });
+
+  const financeTasksAfter = taskService.getTasksByAssignee('finance_1', TaskStatus.PENDING);
+  log('财务的待办是否被自动取消', financeTasksAfter.length === 0 ? '是 - 并行或签一人通过即完成' : '否');
+
+  const allFinanceTasks = taskService.getTasksByInstanceId(instance!.id).filter(t => t.nodeId === 'finance_review');
+  log('财务任务最终状态', allFinanceTasks.map(t => ({ assignee: t.assignee, status: t.status })));
+
+  const history = historyService.getHistoryByInstanceId(instance!.id);
+  log('审批历史', history.map(h => `${h.nodeName} - ${h.actor} - ${h.action}`));
+}
+
+function demoOperatorCheck() {
+  log('【Demo 8】操作人权限校验 - 非任务负责人操作被拒绝');
+
+  const definition = createSerialApprovalDefinition();
+  const instance = flowInstanceService.startInstance(
+    definition.id,
+    'employee_test',
+    { reason: '权限测试' }
+  );
+
+  const tasks = taskService.getTasksByAssignee('manager_a', TaskStatus.PENDING);
+  const mgrTask = tasks.find(t => t.instanceId === instance!.id)!;
+  log('部门经理的待办', { taskId: mgrTask.id, assignee: mgrTask.assignee });
+
+  const result = flowInstanceService.approveTask(mgrTask.id, 'someone_else', '冒充审批');
+  log('非负责人尝试审批', result === null ? '被拒绝 - 返回null' : '竟然通过了!');
+
+  const taskAfter = taskService.getTaskById(mgrTask.id);
+  log('任务仍为pending', taskAfter!.status === TaskStatus.PENDING ? '是 - 状态未变' : '否');
+
+  const normalResult = flowInstanceService.approveTask(mgrTask.id, 'manager_a', '本人审批');
+  log('负责人审批', normalResult !== null ? '成功' : '失败');
+
+  const transferResult = flowInstanceService.transferTask(mgrTask.id, 'someone_else', 'manager_b', '冒充转交');
+  log('非负责人尝试转交', transferResult === null ? '被拒绝' : '竟然通过了!');
+
+  const returnResult = flowInstanceService.returnTask(mgrTask.id, 'someone_else', '冒充退回');
+  log('非负责人尝试退回', returnResult === null ? '被拒绝' : '竟然通过了!');
+}
+
 function main() {
   initDatabase(':memory:');
 
@@ -713,6 +841,8 @@ function main() {
     demoReturnAndWithdraw();
     demoMigration();
     demoRejectInCountersign();
+    demoParallelAnyMode();
+    demoOperatorCheck();
   } catch (e) {
     console.error('演示出错:', e);
     throw e;
@@ -726,13 +856,15 @@ function main() {
   console.log('  1. 流程定义引擎: 支持开始/审批/并行/排他/结束 五种节点');
   console.log('  2. 串行审批: 按顺序依次流转');
   console.log('  3. 会签(ALL): 所有人通过才通过,一人拒绝即拒绝');
-  console.log('  4. 或签(ANY): 一人通过即通过');
-  console.log('  5. 条件分支: 根据表单数据走不同审批路径');
-  console.log('  6. 退回策略: 退回发起人 / 退回上一步 / 指定节点');
-  console.log('  7. 转交: 审批人可转交给其他人');
-  console.log('  8. 撤回: 发起人可在审批完成前撤回');
-  console.log('  9. 流程迁移: 三种策略 - 保留当前节点/从头开始/智能迁移');
-  console.log('  10. 历史追踪: 完整记录所有操作');
+  console.log('  4. 或签(ANY): 一人通过即通过,其余待办自动取消');
+  console.log('  5. 并行或签: 任一分支通过即流转,其他分支自动取消');
+  console.log('  6. 条件分支: 根据表单数据走不同审批路径');
+  console.log('  7. 退回策略: 退回发起人 / 退回上一步 / 指定节点');
+  console.log('  8. 转交: 保留原任务记录,新建被转交人任务,历史可追溯');
+  console.log('  9. 撤回: 发起人可在审批完成前撤回');
+  console.log('  10. 操作人校验: 非任务负责人操作被拒绝');
+  console.log('  11. 流程迁移: 三种策略 - 保留当前节点/从头开始/智能迁移');
+  console.log('  12. 历史追踪: 完整记录所有操作');
   console.log('');
 }
 

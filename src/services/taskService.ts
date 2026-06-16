@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from '../database';
-import { Task, TaskStatus, FlowNode, NodeType, ApprovalMode, ApprovalNodeConfig } from '../types';
+import { Task, TaskStatus, FlowNode, ApprovalMode, ApprovalNodeConfig } from '../types';
 
 export class TaskService {
   createTasks(
@@ -33,6 +33,33 @@ export class TaskService {
     }
 
     return tasks;
+  }
+
+  createSingleTask(
+    instanceId: string,
+    nodeId: string,
+    assignee: string
+  ): Task {
+    const db = getDb();
+    const now = Date.now();
+
+    const task: Task = {
+      id: uuidv4(),
+      instanceId,
+      nodeId,
+      assignee,
+      status: TaskStatus.PENDING,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    const stmt = db.prepare(`
+      INSERT INTO tasks (id, instance_id, node_id, assignee, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(task.id, instanceId, nodeId, assignee, TaskStatus.PENDING, now, now);
+
+    return task;
   }
 
   getTaskById(taskId: string): Task | null {
@@ -85,15 +112,14 @@ export class TaskService {
 
     const now = Date.now();
     const stmt = db.prepare(`
-      UPDATE tasks SET assignee = ?, status = ?, comment = ?, updated_at = ?
+      UPDATE tasks SET status = ?, comment = ?, updated_at = ?
       WHERE id = ?
     `);
-    stmt.run(newAssignee, TaskStatus.PENDING, comment || null, now, taskId);
+    stmt.run(TaskStatus.TRANSFERRED, comment || null, now, taskId);
 
     return {
       ...task,
-      assignee: newAssignee,
-      status: TaskStatus.PENDING,
+      status: TaskStatus.TRANSFERRED,
       comment: comment || task.comment,
       updatedAt: now
     };
@@ -117,6 +143,18 @@ export class TaskService {
       WHERE instance_id = ? AND status = ?
     `);
     stmt.run(TaskStatus.CANCELED, now, instanceId, TaskStatus.PENDING);
+  }
+
+  cancelTasksForNodes(instanceId: string, nodeIds: string[]): void {
+    if (nodeIds.length === 0) return;
+    const db = getDb();
+    const now = Date.now();
+    const placeholders = nodeIds.map(() => '?').join(',');
+    const stmt = db.prepare(`
+      UPDATE tasks SET status = ?, updated_at = ?
+      WHERE instance_id = ? AND status = ? AND node_id IN (${placeholders})
+    `);
+    stmt.run(TaskStatus.CANCELED, now, instanceId, TaskStatus.PENDING, ...nodeIds);
   }
 
   isNodeApprovalComplete(instanceId: string, nodeId: string, mode: ApprovalMode): { complete: boolean; result: boolean } {
@@ -151,7 +189,13 @@ export class TaskService {
         return { complete: false, result: false };
 
       case ApprovalMode.ONE:
-        return { complete: pendingCount === 0, result: approvedCount > 0 };
+        if (approvedCount > 0) {
+          return { complete: true, result: true };
+        }
+        if (pendingCount === 0 && rejectedCount > 0) {
+          return { complete: true, result: false };
+        }
+        return { complete: false, result: false };
 
       default:
         return { complete: false, result: false };
